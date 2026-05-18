@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>MiniCode</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>MiniCode</h1>
+        <p id="workspaceLabel">Loading...</p>
+      </div>
+      <div class="top-actions">
+        <button id="newSessionBtn" class="icon-btn" title="New session">＋</button>
+        <button id="refreshBtn" class="icon-btn" title="Refresh">↻</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="panel sidebar">
+        <section>
+          <h2>Sessions</h2>
+          <div id="sessionList" class="list"></div>
+        </section>
+        <section>
+          <h2>Memory</h2>
+          <div id="memoryList" class="list dense"></div>
+        </section>
+        <section>
+          <h2>Workspace</h2>
+          <pre id="treeView" class="tree"></pre>
+        </section>
+        <section>
+          <h2>Code Index</h2>
+          <pre id="codeIndexView" class="tree"></pre>
+        </section>
+        <section>
+          <h2>Role Trace</h2>
+          <pre id="roleTraceView" class="tree"></pre>
+        </section>
+      </aside>
+
+      <section class="panel chat">
+        <div id="chatLog" class="chatlog"></div>
+        <form id="chatForm" class="composer">
+          <textarea id="chatInput" rows="5" placeholder="Describe the task you want MiniCode to handle..."></textarea>
+          <div class="composer-row">
+            <label class="check"><input type="checkbox" id="confirmRisky" /> confirm risky actions</label>
+            <button type="submit" class="primary">Send</button>
+          </div>
+        </form>
+      </section>
+
+      <aside class="panel tools">
+        <section>
+          <h2>Tools</h2>
+          <div class="tool">
+            <label>Search</label>
+            <input id="searchInput" placeholder="keyword or question" />
+            <button id="searchBtn">Search</button>
+          </div>
+          <div class="tool">
+            <label>Code RAG</label>
+            <input id="ragInput" placeholder="what code path or symbol?" />
+            <div class="row">
+              <button id="ragBtn">Retrieve</button>
+              <button id="reindexBtn">Reindex</button>
+            </div>
+          </div>
+          <div class="tool">
+            <label>Read file</label>
+            <input id="readPath" placeholder="relative path" />
+            <div class="split">
+              <input id="readStart" type="number" value="1" min="1" />
+              <input id="readEnd" type="number" value="120" min="1" />
+            </div>
+            <button id="readBtn">Read</button>
+          </div>
+          <div class="tool">
+            <label>Run command</label>
+            <input id="runCommand" placeholder="python -m pytest" />
+            <div class="row">
+              <label class="check"><input type="checkbox" id="runConfirm" /> confirm</label>
+              <button id="runBtn">Run</button>
+            </div>
+          </div>
+          <div class="tool">
+            <label>Add memory</label>
+            <textarea id="memoryInput" rows="3" placeholder="what should be remembered?"></textarea>
+            <button id="memoryBtn">Remember</button>
+          </div>
+        </section>
+        <section>
+          <h2>Output</h2>
+          <pre id="toolOutput" class="output"></pre>
+        </section>
+      </aside>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
