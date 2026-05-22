@@ -7,94 +7,98 @@
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
-    <header class="topbar">
-      <div>
-        <h1>MiniCode</h1>
-        <p id="workspaceLabel">Loading...</p>
-      </div>
-      <div class="top-actions">
-        <button id="newSessionBtn" class="icon-btn" title="New session">＋</button>
-        <button id="refreshBtn" class="icon-btn" title="Refresh">↻</button>
-      </div>
-    </header>
+    <main class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="mark">M</div>
+          <div>
+            <h1>MiniCode</h1>
+            <p id="workspaceLabel">workspace</p>
+          </div>
+        </div>
 
-    <main class="layout">
-      <aside class="panel sidebar">
+        <button id="newSessionBtn" class="new-chat">新建对话</button>
+
         <section>
-          <h2>Sessions</h2>
-          <div id="sessionList" class="list"></div>
+          <div class="section-title">
+            <span>对话</span>
+            <button id="refreshBtn" title="刷新">刷新</button>
+          </div>
+          <div id="sessionList" class="session-list"></div>
         </section>
-        <section>
-          <h2>Memory</h2>
-          <div id="memoryList" class="list dense"></div>
-        </section>
-        <section>
-          <h2>Workspace</h2>
-          <pre id="treeView" class="tree"></pre>
-        </section>
-        <section>
-          <h2>Code Index</h2>
-          <pre id="codeIndexView" class="tree"></pre>
-        </section>
-        <section>
-          <h2>Role Trace</h2>
-          <pre id="roleTraceView" class="tree"></pre>
+
+        <section class="workspace-card">
+          <div class="section-title">
+            <span>工作区</span>
+            <span id="indexStatus">index --</span>
+          </div>
+          <div class="workspace-row">
+            <span>模型</span>
+            <strong id="modelStatus">offline</strong>
+          </div>
+          <div class="workspace-row">
+            <span>命令</span>
+            <strong id="shellStatus">confirm-only</strong>
+          </div>
+          <button id="settingsBtn" class="ghost">项目设置</button>
         </section>
       </aside>
 
-      <section class="panel chat">
-        <div id="chatLog" class="chatlog"></div>
+      <section class="chat-pane">
+        <header class="chat-header">
+          <div>
+            <h2>MiniCode 助手</h2>
+            <p>在当前仓库里提问、修改文件或运行检查。需要写入和命令执行时会先确认。</p>
+          </div>
+          <label class="confirm-toggle">
+            <input type="checkbox" id="confirmRisky" />
+            <span>允许本次写入 / 命令</span>
+          </label>
+        </header>
+
+        <div id="chatLog" class="chat-log"></div>
+
         <form id="chatForm" class="composer">
-          <textarea id="chatInput" rows="5" placeholder="Describe the task you want MiniCode to handle..."></textarea>
-          <div class="composer-row">
-            <label class="check"><input type="checkbox" id="confirmRisky" /> confirm risky actions</label>
-            <button type="submit" class="primary">Send</button>
+          <textarea id="chatInput" rows="4" placeholder="例如：帮我看看这个项目的入口文件和主要模块；或者：把 README 里的标题改得更清楚，先给我 diff。"></textarea>
+          <div class="composer-actions">
+            <div class="quick-actions">
+              <button type="button" data-prompt="先浏览这个仓库的目录和主要文件，然后总结项目结构。">看项目结构</button>
+              <button type="button" data-prompt="搜索代码里和工具调用、风险确认、patch 相关的实现，并解释流程。">查 Agent 流程</button>
+              <button type="button" data-prompt="运行 python -m py_compile app.py 检查语法。">运行检查</button>
+            </div>
+            <button type="submit" class="send-btn">发送</button>
           </div>
         </form>
       </section>
 
-      <aside class="panel tools">
+      <aside id="settingsPanel" class="settings-panel" aria-hidden="true">
+        <div class="settings-head">
+          <div>
+            <h2>项目设置</h2>
+            <p>这些是后台工具状态，不需要一直打扰主聊天。</p>
+          </div>
+          <button id="closeSettingsBtn" class="icon-btn" title="关闭">x</button>
+        </div>
+
         <section>
-          <h2>Tools</h2>
-          <div class="tool">
-            <label>Search</label>
-            <input id="searchInput" placeholder="keyword or question" />
-            <button id="searchBtn">Search</button>
+          <div class="section-title">
+            <span>文件地图</span>
+            <button id="repoMapBtn">刷新</button>
           </div>
-          <div class="tool">
-            <label>Code RAG</label>
-            <input id="ragInput" placeholder="what code path or symbol?" />
-            <div class="row">
-              <button id="ragBtn">Retrieve</button>
-              <button id="reindexBtn">Reindex</button>
-            </div>
-          </div>
-          <div class="tool">
-            <label>Read file</label>
-            <input id="readPath" placeholder="relative path" />
-            <div class="split">
-              <input id="readStart" type="number" value="1" min="1" />
-              <input id="readEnd" type="number" value="120" min="1" />
-            </div>
-            <button id="readBtn">Read</button>
-          </div>
-          <div class="tool">
-            <label>Run command</label>
-            <input id="runCommand" placeholder="python -m pytest" />
-            <div class="row">
-              <label class="check"><input type="checkbox" id="runConfirm" /> confirm</label>
-              <button id="runBtn">Run</button>
-            </div>
-          </div>
-          <div class="tool">
-            <label>Add memory</label>
-            <textarea id="memoryInput" rows="3" placeholder="what should be remembered?"></textarea>
-            <button id="memoryBtn">Remember</button>
-          </div>
+          <pre id="repoMapView" class="code-box"></pre>
         </section>
+
         <section>
-          <h2>Output</h2>
-          <pre id="toolOutput" class="output"></pre>
+          <div class="section-title">
+            <span>最近执行</span>
+            <button id="reindexBtn">重建索引</button>
+          </div>
+          <div id="activityList" class="activity-list"></div>
+        </section>
+
+        <section>
+          <div class="section-title"><span>输出</span><span id="outputKind">json</span></div>
+          <pre id="toolOutput" class="code-box small"></pre>
         </section>
       </aside>
     </main>

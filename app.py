@@ -38,6 +38,7 @@ MAX_CONTEXT_CHARS = int(os.getenv("MINICODE_MAX_CONTEXT_CHARS", "14000"))
 MAX_FILE_BYTES = int(os.getenv("MINICODE_MAX_FILE_BYTES", "800000"))
 CODE_CHUNK_LINES = int(os.getenv("MINICODE_CODE_CHUNK_LINES", "80"))
 CODE_CHUNK_OVERLAP = int(os.getenv("MINICODE_CODE_CHUNK_OVERLAP", "12"))
+SHOW_BANNER = os.getenv("MINICODE_BANNER", "1") != "0"
 
 TEXT_EXTENSIONS = {
     ".py",
@@ -82,6 +83,15 @@ RISKY_COMMAND_HINTS = [
     r"\bcurl\b.*https?://",
     r"\bwget\b.*https?://",
 ]
+
+BANNER = r"""
+MiniCode
+ /\_/\
+( o.o )  终端伙伴已上线
+ > ^ <   仓库索引已就绪
+
+  写入和命令执行会先确认
+"""
 
 
 def utc_now() -> str:
@@ -155,6 +165,20 @@ def extract_json_block(text: str) -> dict[str, Any] | None:
 
 def format_block(title: str, body: str) -> str:
     return f"{title}\n{body.strip()}"
+
+
+def make_unified_diff(path: str, old: str, new: str, context: int = 3) -> str:
+    import difflib
+
+    return "".join(
+        difflib.unified_diff(
+            old.splitlines(keepends=True),
+            new.splitlines(keepends=True),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            n=context,
+        )
+    )
 
 
 @dataclass
@@ -490,6 +514,29 @@ class DB:
             context_lines.extend(item["snippets"])
         return {"query": query, "count": len(scored), "items": items, "context": "\n".join(context_lines)}
 
+    def repo_map(self, limit: int = 18) -> dict[str, Any]:
+        with self.conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT path,
+                       COUNT(*) AS chunk_count,
+                       MIN(start_line) AS first_line,
+                       MAX(end_line) AS last_line,
+                       MAX(updated_at) AS updated_at
+                FROM code_chunks
+                GROUP BY path
+                ORDER BY chunk_count DESC, path ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        files = [dict(row) for row in rows]
+        return {
+            "files": files,
+            "summary": f"{len(files)} indexed files shown",
+            "stats": self.code_index_stats(),
+        }
+
     def get_cache(self, key: str) -> dict[str, Any] | None:
         with self.conn() as conn:
             row = conn.execute("SELECT * FROM cache WHERE cache_key = ?", (key,)).fetchone()
@@ -633,6 +680,33 @@ class WorkspaceTools:
             "occurrences": occurrences,
             "bytes": len(updated.encode("utf-8")),
         }
+
+    def preview_replace(self, raw: str, old: str, new: str, count: int = 1) -> dict[str, Any]:
+        if not old:
+            raise HTTPException(status_code=400, detail="old text is required for patch preview")
+        path = self._resolve(raw)
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        occurrences = text.count(old)
+        rel = str(path.relative_to(self.root))
+        if not occurrences:
+            return {"path": rel, "changed": False, "occurrences": 0, "diff": ""}
+        updated = text.replace(old, new, count if count > 0 else occurrences)
+        return {
+            "path": rel,
+            "changed": text != updated,
+            "occurrences": occurrences,
+            "diff": make_unified_diff(rel, text, updated),
+        }
+
+    def apply_patch(self, raw: str, old: str, new: str, count: int = 1) -> dict[str, Any]:
+        preview = self.preview_replace(raw, old, new, count)
+        if not preview.get("changed"):
+            return preview
+        result = self.replace(raw, old, new, count)
+        result["diff"] = preview.get("diff", "")
+        return result
 
     def append_text(self, raw: str, content: str) -> dict[str, Any]:
         return self.write(raw, content, mode="append")
@@ -809,6 +883,12 @@ class CodeIndexer:
         result["stats"] = self.stats()
         return result
 
+    def repo_map(self, limit: int = 18) -> dict[str, Any]:
+        stats = self.stats()
+        if int(stats.get("chunk_count") or 0) == 0:
+            self.rebuild()
+        return self.db.repo_map(limit=limit)
+
 
 class LLMBridge:
     def __init__(self, db: DB):
@@ -882,6 +962,8 @@ def classify_intent(message: str) -> str:
     msg = message.lower()
     if any(key in message for key in ["记住", "memory", "偏好", "约束", "保存为记忆"]):
         return "memory"
+    if any(key in message for key in ["入口", "启动方式", "怎么启动", "如何启动", "项目结构", "主要模块"]):
+        return "rag"
     if any(
         key in message
         for key in ["代码理解", "源码", "调用链", "执行流程", "函数", "类", "在哪里", "在哪", "代码", "分析", "解释", "定位", "MiniCode", "Agent"]
@@ -891,7 +973,7 @@ def classify_intent(message: str) -> str:
         return "search"
     if any(key in message for key in ["查看", "打开", "读取", "read", "inspect", "show"]):
         return "read"
-    if any(key in message for key in ["运行", "执行", "测试", "pytest", "lint", "format", "启动"]):
+    if any(key in message for key in ["运行", "执行", "测试", "pytest", "lint", "format"]):
         return "run"
     if any(key in message for key in ["tree", "目录", "结构", "workspace", "文件树"]):
         return "tree"
@@ -925,6 +1007,21 @@ def extract_command(message: str) -> str:
     if match:
         return match.group(1).strip()
     return message.strip()
+
+
+def detect_patch_request(message: str) -> dict[str, str] | None:
+    patterns = [
+        r"(?:预览|preview|生成diff|diff)\s+(.+?)\s+(?:把|将)\s+(.+?)\s+(?:改成|替换为|to)\s+(.+)$",
+        r"(?:patch|修改|替换)\s+(.+?)\s+(.+?)\s*(?:=>|->|为|to)\s*(.+)$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, message, re.I)
+        if not match:
+            continue
+        path, old, new = [part.strip().strip("'\"") for part in match.groups()]
+        if path and old and new:
+            return {"path": path, "old": old, "new": new}
+    return None
 
 
 def infer_memory_notes(message: str, reply: str) -> list[dict[str, Any]]:
@@ -963,6 +1060,7 @@ class MiniCodeAgent:
             return [self._tool_action("rag_search", {"query": message, "limit": 6})]
         if intent == "search":
             return [
+                self._tool_action("repo_map", {"limit": 12}),
                 self._tool_action("rag_search", {"query": message, "limit": 6}),
                 self._tool_action("search", {"query": message, "limit": MAX_SEARCH_RESULTS}),
             ]
@@ -975,16 +1073,29 @@ class MiniCodeAgent:
             ]
         if intent == "tree":
             paths = extract_paths(message)
-            return [self._tool_action("tree", {"path": paths[0] if paths else ".", "max_depth": 2})]
+            return [
+                self._tool_action("tree", {"path": paths[0] if paths else ".", "max_depth": 2}),
+                self._tool_action("repo_map", {"limit": 12}),
+            ]
         if intent == "run":
             return [self._tool_action("run", {"command": extract_command(message), "confirm": confirm_risky}, risk="risky")]
         if intent == "memory":
             return [self._tool_action("remember", {"category": "note", "content": message, "score": 0.7})]
         if intent == "edit":
+            patch = detect_patch_request(message)
+            if patch:
+                tool_name = "apply_patch" if confirm_risky else "patch_preview"
+                return [self._tool_action(tool_name, patch, risk="risky" if tool_name == "apply_patch" else "safe")]
             paths = extract_paths(message)
             if paths:
-                return [self._tool_action("search", {"query": paths[0], "limit": 3})]
-            return [self._tool_action("search", {"query": message, "limit": 5})]
+                return [
+                    self._tool_action("read", {"path": paths[0], "start": 1, "end": 160}),
+                    self._tool_action("validate", {"paths": [paths[0]]}),
+                ]
+            return [
+                self._tool_action("repo_map", {"limit": 12}),
+                self._tool_action("search", {"query": message, "limit": 5}),
+            ]
         if intent == "summarize":
             return []
         return []
@@ -1001,7 +1112,7 @@ class MiniCodeAgent:
               "reply": "给用户的简短回复",
               "plan": ["步骤1", "步骤2"],
               "actions": [
-                {"tool": "rag_search|search|read|tree|write|replace|append|delete|run|validate|remember", "args": {...}, "risk": "safe|risky", "reason": "..."}
+                {"tool": "rag_search|repo_map|search|read|tree|patch_preview|apply_patch|write|replace|append|delete|run|validate|remember", "args": {...}, "risk": "safe|risky", "reason": "..."}
               ],
               "memory": [
                 {"category": "preference|decision|task|note", "content": "...", "score": 0.5}
@@ -1020,7 +1131,7 @@ class MiniCodeAgent:
                 "context": context[:MAX_CONTEXT_CHARS],
                 "memories": memories[:8],
                 "workspace_root": str(WORKSPACE_ROOT),
-                "allowed_tools": ["rag_search", "search", "read", "tree", "write", "replace", "append", "delete", "run", "validate", "remember"],
+                "allowed_tools": ["rag_search", "repo_map", "search", "read", "tree", "patch_preview", "apply_patch", "write", "replace", "append", "delete", "run", "validate", "remember"],
             },
             ensure_ascii=False,
             indent=2,
@@ -1039,6 +1150,17 @@ class MiniCodeAgent:
             for item in items[:4]:
                 lines.append(f"- {item['path']}:{item['start_line']}-{item['end_line']} (score {item['score']}): {shorten(' | '.join(item.get('snippets', [])), 180)}")
             return "\n".join(lines)
+        if result.get("tool") == "repo_map":
+            files = result.get("data", {}).get("files", [])
+            if not files:
+                return "代码索引尚未生成。"
+            return "\n".join(
+                f"- {item['path']} ({item['chunk_count']} chunks, lines {item['first_line']}-{item['last_line']})"
+                for item in files[:8]
+            )
+        if result.get("tool") in {"patch_preview", "apply_patch"}:
+            diff = result.get("data", {}).get("diff", "")
+            return diff[:1200] if diff else result.get("summary", "")
         if result.get("tool") == "search":
             items = result.get("data", {}).get("items", [])
             if not items:
@@ -1069,6 +1191,10 @@ class MiniCodeAgent:
         if tool == "rag_search":
             data = self.indexer.search(args.get("query", ""), limit=parse_int(args.get("limit"), 6))
             summary = f"代码索引命中 {data['count']} 个 chunk"
+            ok = True
+        elif tool == "repo_map":
+            data = self.indexer.repo_map(limit=parse_int(args.get("limit"), 18))
+            summary = f"Repo map 展示 {len(data.get('files', []))} 个索引文件"
             ok = True
         elif tool == "rebuild_index":
             data = self.indexer.rebuild()
@@ -1104,6 +1230,17 @@ class MiniCodeAgent:
                 return ToolResult(tool=tool, ok=False, summary="替换需要确认后再执行", data=args, requires_confirmation=True)
             data = self.tools.replace(args.get("path", ""), args.get("old", ""), args.get("new", ""), count=parse_int(args.get("count"), 1))
             summary = f"替换 {data['path']}"
+            ok = bool(data.get("changed"))
+        elif tool == "patch_preview":
+            data = self.tools.preview_replace(args.get("path", ""), args.get("old", ""), args.get("new", ""), count=parse_int(args.get("count"), 1))
+            summary = f"生成 {data['path']} 的 diff 预览" if data.get("changed") else f"{data.get('path', '')} 未产生 diff"
+            ok = bool(data.get("changed"))
+        elif tool == "apply_patch":
+            if not confirm_risky:
+                preview = self.tools.preview_replace(args.get("path", ""), args.get("old", ""), args.get("new", ""), count=parse_int(args.get("count"), 1))
+                return ToolResult(tool=tool, ok=False, summary="应用 patch 需要确认后再执行", data=preview, requires_confirmation=True)
+            data = self.tools.apply_patch(args.get("path", ""), args.get("old", ""), args.get("new", ""), count=parse_int(args.get("count"), 1))
+            summary = f"应用 patch 到 {data.get('path', '')}"
             ok = bool(data.get("changed"))
         elif tool == "append":
             if not confirm_risky:
@@ -1207,7 +1344,7 @@ class MiniCodeAgent:
                 "memories_considered": len(relevant_memories),
             },
         )
-        risky_actions = [asdict(action) for action in actions if action.risk == "risky" or action.tool in {"write", "replace", "append", "delete", "run"}]
+        risky_actions = [asdict(action) for action in actions if action.risk == "risky" or action.tool in {"write", "replace", "apply_patch", "append", "delete", "run"}]
         record_role(
             "RiskChecker",
             "needs_confirmation" if risky_actions and not confirm_risky else "ok",
@@ -1236,7 +1373,7 @@ class MiniCodeAgent:
             if result.requires_confirmation:
                 needs_confirmation = True
             tool_results.append(result)
-            if result.ok and result.tool in {"write", "replace", "append"}:
+            if result.ok and result.tool in {"write", "replace", "apply_patch", "append"}:
                 path = str(result.data.get("path") or "").strip()
                 if path and path not in changed_paths:
                     changed_paths.append(path)
@@ -1361,8 +1498,8 @@ class MiniCodeAgent:
         }
 
     def direct_tool(self, name: str, args: dict[str, Any], session_id: str | None = None, confirm: bool = False) -> dict[str, Any]:
-        session_id = self.db.ensure_session(session_id, title_hint="Tool call")
-        action = ToolAction(tool=name, args=args, risk="risky" if name in {"write", "replace", "append", "delete", "run"} else "safe")
+        session_id = self.db.ensure_session(session_id, title_hint="工具调用")
+        action = ToolAction(tool=name, args=args, risk="risky" if name in {"write", "replace", "apply_patch", "append", "delete", "run"} else "safe")
         result = self._execute_action(session_id, action, confirm_risky=confirm)
         payload = {"session_id": session_id, **asdict(result)}
         self.db.add_role_trace(
@@ -1371,7 +1508,7 @@ class MiniCodeAgent:
             "ok" if result.ok else "failed",
             {"tool": name, "args": args, "summary": result.summary},
         )
-        if result.ok and result.tool in {"write", "replace", "append"}:
+        if result.ok and result.tool in {"write", "replace", "apply_patch", "append"}:
             path = str(result.data.get("path") or "").strip()
             if path:
                 validation = self.tools.validate([path])
@@ -1384,7 +1521,7 @@ class MiniCodeAgent:
                     "ok" if validation.get("ok") else "failed",
                     {"changed_paths": [path], "validation": validation, "index_refresh": index_refresh},
                 )
-        elif result.ok and result.tool in {"rag_search", "search", "read", "tree", "validate", "rebuild_index", "remember"}:
+        elif result.ok and result.tool in {"rag_search", "repo_map", "patch_preview", "search", "read", "tree", "validate", "rebuild_index", "remember"}:
             self.db.add_role_trace(
                 session_id,
                 "Reviewer",
@@ -1400,6 +1537,14 @@ tools = WorkspaceTools(WORKSPACE_ROOT)
 indexer = CodeIndexer(db, tools)
 llm = LLMBridge(db)
 brain = MiniCodeAgent(db, tools, indexer, llm)
+
+if SHOW_BANNER:
+    print(BANNER)
+    print(f"  工作区: {WORKSPACE_ROOT}")
+    print(f"  数据:   {DATA_DIR}")
+    print(f"  模型:   {'enabled' if llm.enabled else 'offline heuristics'}")
+    print(f"  命令:   {'enabled' if ALLOW_SHELL else 'confirm-only'}")
+    print("")
 
 if int(indexer.stats().get("chunk_count") or 0) == 0:
     try:
@@ -1419,6 +1564,18 @@ class ToolRequest(BaseModel):
     args: dict[str, Any] = Field(default_factory=dict)
     session_id: str | None = None
     confirm: bool = False
+
+
+class PatchRequest(BaseModel):
+    path: str = Field(..., min_length=1)
+    old: str = Field(..., min_length=1)
+    new: str
+    count: int = 1
+    session_id: str | None = None
+    confirm: bool = False
+
+    def tool_args(self) -> dict[str, Any]:
+        return {"path": self.path, "old": self.old, "new": self.new, "count": self.count}
 
 
 class SessionCreateRequest(BaseModel):
@@ -1510,7 +1667,7 @@ async def chat(body: ChatRequest):
 
 @app.post("/api/tool")
 async def direct_tool(body: ToolRequest):
-    if body.name in {"write", "replace", "append", "delete", "run"} and not body.confirm:
+    if body.name in {"write", "replace", "apply_patch", "append", "delete", "run"} and not body.confirm:
         raise HTTPException(status_code=400, detail="This tool needs confirm=true")
     return brain.direct_tool(body.name, body.args, session_id=body.session_id, confirm=body.confirm)
 
@@ -1528,6 +1685,23 @@ async def api_search(q: str, limit: int = MAX_SEARCH_RESULTS):
 @app.get("/api/rag")
 async def api_rag(q: str, limit: int = 6):
     return indexer.search(q, limit=limit)
+
+
+@app.get("/api/repo-map")
+async def api_repo_map(limit: int = 18):
+    return indexer.repo_map(limit=limit)
+
+
+@app.post("/api/patch/preview")
+async def api_patch_preview(body: PatchRequest):
+    return brain.direct_tool("patch_preview", body.tool_args(), session_id=body.session_id, confirm=False)
+
+
+@app.post("/api/patch/apply")
+async def api_patch_apply(body: PatchRequest):
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="Patch apply needs confirm=true")
+    return brain.direct_tool("apply_patch", body.tool_args(), session_id=body.session_id, confirm=True)
 
 
 @app.post("/api/index/rebuild")
